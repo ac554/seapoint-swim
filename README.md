@@ -1,0 +1,67 @@
+# Seapoint Swim — GitHub Pages version
+
+A mobile-first tide/sea-state planner for Seapoint, Dublin. **Static hosting, no server, no API keys, no AI credits.**
+
+## How it works
+
+- GitHub Actions fetches the Marine Institute tide prediction, Open-Meteo wind, air, waves and modelled sea temperature, Met Éireann warning feed, EPA bathing alerts, and M2 offshore buoy.
+- It produces one static `site/data/conditions.json` for roughly the next eight days and redeploys `site/` directly to GitHub Pages.
+- The page calculates the swimming verdict for the exact Dublin-local date/time in your browser using only that JSON. **No provider APIs are called from the browser**, and CORS is not required.
+- The visible status and source list disclose unavailable providers. A snapshot older than **90 minutes** becomes **Not enough data**, regardless of previous conditions. An old routine water-quality sample *does not automatically* mean Caution; active bathing alerts are checked separately.
+- Today, Tomorrow, custom date/time and the hour-by-hour overview work without a backend. Sea temperature, air temperature and wind chill appear immediately below the verdict.
+- Tide preferences (roughly ±3 hours around high tide, varying with high-water height) are **heuristic**; no invented minimum water depth at the steps or metre safety threshold is used. Height above adjacent low tide is calculated only from levels with the same datum.
+
+## Publish using GitHub Pages
+
+1. Create a **public** repository named `seapoint-swim` with `main` as its default branch. Public repositories can use standard hosted GitHub Actions and GitHub Pages without an Actions-minute charge. Upload **all the contents of this folder**, including hidden `.github/` (do not upload the ZIP itself as a single repository file).
+2. In the repository: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+3. Go to **Actions → Refresh sea conditions and publish Seapoint Swim → Run workflow**. This fetches current data and publishes the site. You can inspect the returned logs and the source statuses in the run summary. The site URL will be `https://<OWNER>.github.io/seapoint-swim/`, subject to your repository and Pages settings.
+4. The refresh is scheduled **every 15 minutes at :07, :22, :37, :52 UTC**, and also on push and on manual triggering. Scheduled starts are best-effort and may be delayed or occasionally skipped. The site exposes a stale-data warning if the most recent published copy is old.
+5. To change to **every five minutes**, edit `.github/workflows/pages.yml` and replace the cron expression with `*/5 * * * *`. Every 30 minutes could be `7,37 * * * *`.
+
+### Create/push from terminal (alternative to uploading files through browser)
+
+Create an empty public repository on GitHub first, then from the extracted project folder run:
+
+```bash
+git init -b main
+git add .
+git commit -m "Create Seapoint Swim static website"
+git remote add origin https://github.com/YOUR_USERNAME/seapoint-swim.git
+git push -u origin main
+```
+
+## How often can it update?
+
+The minimum GitHub Actions schedule is **five minutes**. I recommend 15 minutes (96 runs/day) for this application. The forecasts themselves are generally updated less frequently than the polling schedule. A scheduled workflow is not guaranteed to start at an exact minute. Public-repository scheduled workflows can become disabled after 60 days without repository activity, so a **monthly keepalive commit** is included in `.github/workflows/keepalive.yml` (requires the default branch to permit the Actions bot to push; if branch protection blocks it, schedule maintenance or re-enable the schedule yourself).
+
+The refresh workflow **does not commit JSON snapshots to git** every 15 minutes. It creates a new GitHub Pages deployment with an updated snapshot. This avoids thousands of data commits.
+
+## Test locally
+
+Node 20+ required for the data updater. No dependencies.
+
+```bash
+npm test
+node scripts/update-data.js
+python3 -m http.server 4173 --directory site
+```
+
+Open `http://localhost:4173/`. Running `node scripts/update-data.js` requires outbound access to the marine and weather providers. Before the first refresh, `site/data/conditions.json` is deliberately marked **unavailable**. It contains no invented test readings.
+
+## Reliability and limitations
+
+- Wave heights are offshore **model forecasts**, not direct wave measurements at Seapoint steps. M2 is an offshore observation, not a Seapoint sensor. The wind-chill formula describes dry exposed skin, not chilling of wet skin after a swim.
+- The listed Met Éireann warning feed may not cover every type of marine safety advisory; the site links to the official marine forecast to check additional notices.
+- The updater gives each request a timeout and lists provider failure reasons in its workflow summary. A failed provider is **not** assumed to be safe. If a core tide, wind or wave source fails, verdicts cannot be favourable.
+- The published Dublin Port tide-table fallback is dated 13–30 November 2026, and is used only for those dates if the Marine Institute tide prediction fails. It is not an evergreen tide table.
+- GitHub Pages does not guarantee exact refresh timing or real-time measurements. Always inspect local conditions, access steps, currents, ferry wash, water quality and current weather warnings before entering the sea. Cold-water shock can happen below 15°C regardless of swimming experience.
+- The workflow and browser interface were tested with mocked provider responses and static local rendering. **The actual external APIs cannot be verified end-to-end in this environment.** After first deployment, review workflow logs and source diagnostics, and only rely on the recommendation when the essential data show as connected.
+
+## Source docs
+
+- [Marine Institute tide predictions](https://erddap.marine.ie/erddap/info/imiTidePrediction/index.html)
+- [Open-Meteo weather and marine APIs](https://open-meteo.com/en/docs/marine-weather-api)
+- [Met Éireann marine forecast](https://www.met.ie/forecasts/marine-inland-lakes)
+- [EPA bathing-water alerts](https://www.beaches.ie/)
+- [GitHub Actions scheduled workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)

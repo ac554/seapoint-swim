@@ -1,0 +1,8 @@
+{
+  "name":"seapoint-swim-github-pages",
+  "private":true,
+  "version":"4.0.0",
+  "description":"Static Seapoint swimming forecast with GitHub Actions data refresh",
+  "scripts":{"test":"node --test tests/*.test.js", "refresh":"node scripts/update-data.js", "preview":"python3 -m http.server 4173 --directory site"},
+  "engines":{"node":">=20"}
+}
