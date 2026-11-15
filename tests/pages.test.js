@@ -1,0 +1,98 @@
+'use strict';
+const test=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const {buildSnapshot,mergeWaveForecast,parseBuoyCsv}=require('../scripts/update-data');
+const core=require('../site/core');
+const now=Date.parse('2026-11-15T08:00:00Z');
+const day='2026-11-15';
+const hours=Array.from({length:8*24},(_,i)=>new Date(Date.parse(day+'T00:00:00Z')+i*3600000).toISOString().slice(0,16));
+function cosineTideCSV(){
+ let s='time,Water_Level\nUTC,metres\n';
+ const beginning=now-3*86400000;
+ for(let i=0;i<13*24*6;i++){
+  const t=beginning+i*10*60000;
+  const localMinute=(t-Date.parse(day+'T14:00:00Z'))/60000;
+  const v=2.40+1.2*Math.cos(2*Math.PI*localMinute/(12*60+25));
+  s+=new Date(t).toISOString().replace('.000','')+','+v.toFixed(3)+'\n';
+ }
+ return s;
+}
+function okText(text){return {ok:true,json:async()=>JSON.parse(text),text:async()=>text};}
+function makeFetch({tide=true,wind=true,waves=true,warning=true,alerts=true}={}){
+ return async input=>{
+  const u=new URL(input);
+  if (u.hostname === 'erddap.marine.ie') {
+    const constraints = decodeURIComponent(u.search).split('&').slice(1);
+    const times = constraints.filter(part => part.startsWith('time'));
+    assert.equal(times.length, u.pathname.includes('imiTidePrediction') ? 2 : 1);
+    for (const condition of times) assert.match(condition, /^time[<>]=\d{4}-/);
+  }
+  if(u.pathname.includes('imiTidePrediction')) return tide?okText(cosineTideCSV()):{ok:false,status:503};
+  if(u.pathname.includes('IWBNetwork'))return okText(`time,WindSpeed,WaveHeight,SeaTemperature\nUTC,knots,metres,degree_C\n2026-11-15T07:00:00Z,4.3,0.4,10.4\n`);
+  if(u.hostname==='api.open-meteo.com')return wind?okText(JSON.stringify({
+   hourly:{time:hours,wind_speed_10m:hours.map(()=>6),wind_gusts_10m:hours.map(()=>8),wind_direction_10m:hours.map(()=>240),temperature_2m:hours.map(()=>7),apparent_temperature:hours.map(()=>4),is_day:hours.map(x=>x.slice(11,13)>='08'&&x.slice(11,13)<='16'?1:0)},
+   daily:{time:[day],sunrise:[day+'T07:50'],sunset:[day+'T16:22']}
+  })): {ok:false,status:502};
+  if(u.hostname==='marine-api.open-meteo.com'){
+   if(u.searchParams.get('hourly')==='sea_surface_temperature')return okText(JSON.stringify({hourly:{time:hours,sea_surface_temperature:hours.map(()=>11.2)}}));
+   return waves?okText(JSON.stringify({hourly:{time:hours,wave_height:hours.map(()=>.25),wave_period:hours.map(()=>4.1),wave_direction:hours.map(()=>70)}})):{ok:false,status:503};
+  }
+  if(u.hostname==='www.met.ie')return warning?okText('[]'):{ok:false,status:502};
+  if(u.hostname==='data.epa.ie')return alerts?okText('{"count":0,"list":[]}'):{ok:false,status:502};
+  throw Error('Unexpected test endpoint '+input);
+ }
+}
+function assess(s,date='2026-11-15',time='14:00'){
+ return core.assess({date,time,points:s.tidePoints,events:s.events,wind:s.wind,waves:s.waves,seaTemp:s.seaTemp,warningFeed:s.warningFeed,alertsFeed:s.alertsFeed,buoyTemp:s.buoyTemp,sources:{tides:{fallback:s.notes.tides.fallback}},now});
+}
+test('Github Pages paths are relative and browser core is loaded',()=>{
+ const html=fs.readFileSync('site/index.html','utf8');
+ assert.match(html,/src="\.\/core\.js"/);assert.match(html,/src="\.\/app\.js"/);
+ assert.doesNotMatch(html,/src="\/app\.js"/);
+});
+test('mocked upstreams yield a complete snapshot for selected day',async()=>{
+ const d=await buildSnapshot({fetchImpl:makeFetch(),now});
+ for(const meta of Object.values(d.sources))assert.equal(meta.status,'ok',JSON.stringify(meta));
+ assert.ok(d.tidePoints.length>1000);assert.ok(d.events.length>20);
+ const a=assess(d);
+ assert.equal(a.waves.heightM,.25);assert.equal(a.wind.speedKn,6);
+ assert.equal(a.temperature.waterC,11.2);assert.equal(a.temperature.airC,7);
+ assert.equal(a.status,'good');
+});
+test('a missing wave API does not fabricate a good verdict',async()=>{
+ const d=await buildSnapshot({fetchImpl:makeFetch({waves:false}),now});
+ assert.equal(d.sources.waves.status,'unavailable');
+ assert.equal(assess(d).status,'unknown');
+});
+test('dated official tide table fallback is labelled and contains no fake selected level',async()=>{
+ const d=await buildSnapshot({fetchImpl:makeFetch({tide:false}),now});
+ assert.equal(d.sources.tide.status,'published-copy');
+ const a=assess(d);assert.equal(a.tide.datum,'Dublin Port chart datum');
+ assert.equal(a.tide.selectedLevel,null);
+ assert.equal(a.tide.aboveLow,null);
+});
+test('missing warning and alerts feed is shown as unverified, not invented safe',async()=>{
+ const d=await buildSnapshot({fetchImpl:makeFetch({warning:false,alerts:false}),now});
+ const a=assess(d);
+ assert.equal(a.warnings.verified,false);assert.equal(a.water.verified,false);
+ assert.ok(a.caveats.some(c=>/could not be checked/i.test(c)));
+});
+test('active Seapoint bathing restriction blocks a favourable forecast',async()=>{
+ const d=await buildSnapshot({fetchImpl:makeFetch(),now});
+ d.alertsFeed={count:1,list:[{beach_id:'IEEABWC090_0000_0100',start_date:'2026-11-13',end_date:'2026-11-17',description:'Bathe prohibited'}]};
+ assert.equal(assess(d).status,'avoid');
+});
+test('water temperature below 15 C is noted without automatically downgrading a calm swim',async()=>{
+ const d=await buildSnapshot({fetchImpl:makeFetch(),now});const a=assess(d);
+ assert.equal(a.temperature.coldWater,true);assert.equal(a.status,'good');
+});
+test('wave fallback uses best-match where the coastal model has no data',()=>{
+ const primary={hourly:{time:['2026-11-15T14:00'],wave_height:[null],wave_period:[null],wave_direction:[null]}};
+ const backup={hourly:{time:hours,wave_height:hours.map(()=>.31),wave_period:hours.map(()=>3),wave_direction:hours.map(()=>70)}};
+ const v=mergeWaveForecast(primary,backup);assert.equal(v.hourly.wave_height[14],.31);
+});
+test('buoy age and temperature parsed as an offshore observation',()=>{
+ const csv='time,WindSpeed,WaveHeight,SeaTemperature\nUTC,knots,metres,degree_C\n2026-11-15T07:00:00Z,4.3,0.4,10.4\n';
+ const b=parseBuoyCsv(csv,now);assert.equal(b.fresh,true);assert.equal(b.waterC,10.4);
+});
